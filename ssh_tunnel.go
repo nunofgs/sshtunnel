@@ -21,6 +21,8 @@ type SSHTunnel struct {
 	Conns                 []net.Conn
 	SvrConns              []*ssh.Client
 	MaxConnectionAttempts int
+	ConnectionEstablished chan net.Conn
+	ConnectionFailure     chan error
 	isOpen                bool
 	close                 chan interface{}
 }
@@ -127,6 +129,9 @@ func (tunnel *SSHTunnel) forward(localConn net.Conn) {
 			if attemptsLeft <= 0 {
 				tunnel.logf("server dial error: %v: exceeded %d attempts", err, tunnel.MaxConnectionAttempts)
 
+				// Allow callers to handle the error.
+				tunnel.ConnectionFailure <- err
+
 				if err := localConn.Close(); err != nil {
 					tunnel.logf("failed to close local connection: %v", err)
 					return
@@ -140,6 +145,9 @@ func (tunnel *SSHTunnel) forward(localConn net.Conn) {
 			break
 		}
 	}
+
+	// Allow callers to be notified of the successful connection.
+	tunnel.ConnectionEstablished <- localConn
 
 	tunnel.logf("connected to %s (1 of 2)\n", tunnel.Server.String())
 	tunnel.SvrConns = append(tunnel.SvrConns, serverConn)
@@ -201,10 +209,12 @@ func NewSSHTunnel(tunnel string, auth ssh.AuthMethod, destination string, localp
 				return nil
 			},
 		},
-		Local:  localEndpoint,
-		Server: server,
-		Remote: remoteEndpoint,
-		close:  make(chan interface{}),
+		Local:                 localEndpoint,
+		Server:                server,
+		Remote:                remoteEndpoint,
+		ConnectionEstablished: make(chan net.Conn),
+		ConnectionFailure:     make(chan error),
+		close:                 make(chan interface{}),
 	}
 
 	return sshTunnel, nil
