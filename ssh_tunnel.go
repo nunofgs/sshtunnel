@@ -21,11 +21,13 @@ type SSHTunnel struct {
 	Conns                 []net.Conn
 	SvrConns              []*ssh.Client
 	MaxConnectionAttempts int
-	ConnectionEstablished chan net.Conn
-	ConnectionFailure     chan error
 	isOpen                bool
 	close                 chan interface{}
+	connectionStartFns    []func(net.Conn)
+	connectionErrorFns    []func(error)
 }
+
+type Option func(*SSHTunnel)
 
 func (tunnel *SSHTunnel) logf(fmt string, args ...interface{}) {
 	if tunnel.Log != nil {
@@ -130,7 +132,9 @@ func (tunnel *SSHTunnel) forward(localConn net.Conn) {
 				tunnel.logf("server dial error: %v: exceeded %d attempts", err, tunnel.MaxConnectionAttempts)
 
 				// Allow callers to handle the error.
-				tunnel.ConnectionFailure <- err
+				for _, fn := range tunnel.connectionErrorFns {
+					fn(err)
+				}
 
 				if err := localConn.Close(); err != nil {
 					tunnel.logf("failed to close local connection: %v", err)
@@ -147,7 +151,9 @@ func (tunnel *SSHTunnel) forward(localConn net.Conn) {
 	}
 
 	// Allow callers to be notified of the successful connection.
-	tunnel.ConnectionEstablished <- localConn
+	for _, fn := range tunnel.connectionStartFns {
+		fn(localConn)
+	}
 
 	tunnel.logf("connected to %s (1 of 2)\n", tunnel.Server.String())
 	tunnel.SvrConns = append(tunnel.SvrConns, serverConn)
@@ -181,7 +187,7 @@ func (tunnel *SSHTunnel) Close() {
 }
 
 // NewSSHTunnel creates a new single-use tunnel. Supplying "0" for localport will use a random port.
-func NewSSHTunnel(tunnel string, auth ssh.AuthMethod, destination string, localport string) (*SSHTunnel, error) {
+func NewSSHTunnel(tunnel string, auth ssh.AuthMethod, destination string, localport string, extraOptions ...Option) (*SSHTunnel, error) {
 
 	localEndpoint, err := NewEndpoint("localhost:" + localport)
 	if err != nil {
@@ -209,13 +215,27 @@ func NewSSHTunnel(tunnel string, auth ssh.AuthMethod, destination string, localp
 				return nil
 			},
 		},
-		Local:                 localEndpoint,
-		Server:                server,
-		Remote:                remoteEndpoint,
-		ConnectionEstablished: make(chan net.Conn),
-		ConnectionFailure:     make(chan error),
-		close:                 make(chan interface{}),
+		Local:  localEndpoint,
+		Server: server,
+		Remote: remoteEndpoint,
+		close:  make(chan interface{}),
+	}
+
+	for _, opt := range extraOptions {
+		opt(sshTunnel)
 	}
 
 	return sshTunnel, nil
+}
+
+func WithConnectionStart(fn func(net.Conn)) Option {
+	return func(c *SSHTunnel) {
+		c.connectionStartFns = append(c.connectionStartFns, fn)
+	}
+}
+
+func WithConnectionError(fn func(error)) Option {
+	return func(c *SSHTunnel) {
+		c.connectionErrorFns = append(c.connectionErrorFns, fn)
+	}
 }
